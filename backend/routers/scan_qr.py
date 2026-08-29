@@ -2,15 +2,11 @@ from fastapi import APIRouter, Request
 from urllib.parse import urlparse, parse_qs
 from config.schemas import ScanResponse, QRScanRequest
 from services.scoring import calculate_risk_score
+from services.explainer import generate_explanation
+from config.database import supabase
 import uuid
 
 router = APIRouter(prefix="/scan", tags=["QR / VPA Scanner"])
-
-MOCK_VPA_REGISTRY = {
-    "merchant@okhdfcbank": {"is_verified": True, "reports": 0},
-    "scammer@upi": {"is_verified": False, "reports": 4},
-    "unknown_vendor@axis": {"is_verified": False, "reports": 0}
-}
 
 def parse_upi_uri(uri: str) -> dict:
     if not uri or not uri.startswith("upi://pay"):
@@ -44,16 +40,29 @@ async def scan_qr(payload: QRScanRequest, request: Request):
             scanner="qr",
             verdict="unable_to_verify",
             safety_score=None,
-            explanation="Invalid or unreadable QR code. No Virtual Payment Address (VPA) detected.",
+            explanation="Invalid or unreadable QR code. No VPA detected.",
             signals=["MALFORMED_PAYLOAD"],
-            recommended_actions=["Re-scan the QR code or manually verify the merchant."],
+            recommended_actions=["Re-scan the QR code or manually verify."],
             provider_status="ok",
             can_report=False
         )
 
-    record = MOCK_VPA_REGISTRY.get(vpa, {"is_verified": False, "reports": 0})
-    is_verified = record["is_verified"]
-    report_count = record["reports"]
+    is_verified = False
+    report_count = 0
+
+    if supabase:
+        try:
+            vpa_res = supabase.table("vpas").select("*").eq("vpa_normalized", vpa).execute()
+            print("SUPABASE RESPONSE:", vpa_res)  # Check your terminal output
+            if vpa_res.data:
+                vpa_record = vpa_res.data[0]
+                is_verified = vpa_record.get("trusted_record", False)
+                vpa_id = vpa_record.get("id")
+                
+                rep_res = supabase.table("reports").select("id").eq("vpa_id", vpa_id).execute()
+                report_count = len(rep_res.data)
+        except Exception as e:
+            print("SUPABASE ERROR EXCEPTION:", e)  # Check your terminal output
 
     score, verdict, signals = calculate_risk_score(
         is_verified=is_verified,
@@ -61,14 +70,13 @@ async def scan_qr(payload: QRScanRequest, request: Request):
         txn_type=txn_type
     )
 
+    explanation = await generate_explanation(verdict, score, signals)
+
     if verdict == "green":
-        explanation = f"Verified merchant ({vpa}). Standard payment request with zero reported risk."
         actions = ["Review transaction details and proceed with payment."]
     elif verdict == "yellow":
-        explanation = f"Unverified account ({vpa}) with no prior transaction history. Caution advised."
         actions = ["Verify payee identity independently before sending funds."]
     else:
-        explanation = f"High risk detected. This transaction exhibits risk flags: {', '.join(signals)}."
         actions = ["Do not authorize payment.", "Report this VPA as fraudulent."]
 
     return ScanResponse(
