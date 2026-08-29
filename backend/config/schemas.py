@@ -1,29 +1,24 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional, Literal
-from uuid import uuid4
-
-VerdictType = Literal["green", "yellow", "red", "unable_to_verify"]
-ScannerType = Literal["qr", "screenshot", "url", "text"]
-ProviderStatus = Literal["ok", "unavailable", "mock"]
-
-class ScanResponse(BaseModel):
-    request_id: str = Field(default_factory=lambda: str(uuid4()))
-    scanner: ScannerType
-    verdict: VerdictType
-    safety_score: Optional[int] = Field(None, ge=0, le=100)
-    explanation: str
-    signals: List[str] = Field(default_factory=list)
-    recommended_actions: List[str] = Field(default_factory=list)
-    provider_status: ProviderStatus = "ok"
-    can_report: bool = True
+from pydantic import BaseModel
+from typing import List, Union, Dict, Literal, Optional
 
 class QRScanRequest(BaseModel):
     vpa: Optional[str] = None
     amount: Optional[float] = None
-    txn_type: Optional[str] = "pay"
+    txn_type: Optional[str] = None
     qr_raw: Optional[str] = None
 
-class ErrorResponse(BaseModel):
-    request_id: str
-    error_code: str
+class Signal(BaseModel):
+    code: str
+    severity: Literal['info', 'caution', 'high']  # Ensures frontend doesn't crash on .toUpperCase()
     message: str
+
+class ScanResponseEnvelope(BaseModel):
+    request_id: str
+    scanner: Literal['qr', 'vpa', 'screenshot', 'url', 'text', 'document']
+    verdict: Literal['green', 'yellow', 'red', 'unable_to_verify']
+    safety_score: int
+    explanation: str
+    signals: List[Signal]  # Must be a list of Signal objects
+    recommended_actions: List[str]
+    provider_status: Union[str, Dict[str, str]]
+    can_report: bool
