@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from routers import scan_qr
+
+from backend.routers import scan_qr, scan_screenshot, reports
 import uuid
 
 app = FastAPI(
@@ -9,6 +10,7 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# CORS configuration to allow mobile app connections
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,4 +35,7 @@ async def healthz():
 async def readyz():
     return {"status": "ready"}
 
+# Register all feature routers
+app.include_router(reports.router, prefix="/api/v1")
 app.include_router(scan_qr.router, prefix="/api/v1")
+app.include_router(scan_screenshot.router, prefix="/api/v1")

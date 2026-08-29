@@ -1,5 +1,5 @@
 from typing import Tuple, List
-from config.schemas import ScanResponseEnvelope, Signal
+from backend.config.schemas import ScanResponseEnvelope, Signal
 
 def calculate_risk_score(
     is_verified: bool,

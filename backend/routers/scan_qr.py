@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Request
 from urllib.parse import urlparse, parse_qs
-from config.schemas import ScanResponseEnvelope, QRScanRequest, Signal
-from services.scoring import calculate_risk_score
-from services.explainer import generate_explanation
-from config.database import supabase
+from backend.config.schemas import ScanResponseEnvelope, QRScanRequest, Signal
+from backend.services.scoring import calculate_risk_score
+from backend.services.explainer import generate_explanation
+from backend.config.database import supabase
 import uuid
 
 router = APIRouter(prefix="/scan", tags=["QR / VPA Scanner"])
