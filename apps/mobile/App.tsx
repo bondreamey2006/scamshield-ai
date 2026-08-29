@@ -4,6 +4,10 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator, NativeStackScreenProps } from '@react-navigation/native-stack';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
+
+// --- CENTRALIZED API CONFIGURATION ---
+const API_BASE_URL = 'http://172.31.98.5:8000';
 
 // --- SHARED CONTRACT TYPES ---
 export type ScannerType = 'qr' | 'vpa' | 'screenshot' | 'url' | 'text' | 'document';
@@ -38,70 +42,57 @@ type RootStackParamList = {
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
-// --- MOCK API ENGINES (Fallbacks for local tools) ---
-const analyzeScreenshotMock = (): ScanResponseEnvelope => ({
-  request_id: `screenshot-${Date.now()}`,
-  scanner: 'screenshot',
-  verdict: 'red',
-  safety_score: 15,
-  explanation: 'HIGH RISK: OCR detected text matching known phishing templates ("Urgent KYC update required").',
-  signals: [{ code: 'PHISHING_PATTERN_MATCH', severity: 'high', message: 'Image contains urgency language.' }],
-  recommended_actions: ['Delete image immediately.', 'Do not click links or share credentials.'],
-  provider_status: { llm: 'success', threat_lookup: 'success' },
-  can_report: true,
-});
-
-const analyzeUrlMock = (url: string): ScanResponseEnvelope => {
-  const isApk = url.endsWith('.apk') || url.includes('download-app');
-  return {
-    request_id: `url-scan-${Date.now()}`,
-    scanner: 'url',
-    verdict: isApk ? 'red' : 'yellow',
-    safety_score: isApk ? 10 : 55,
-    explanation: isApk
-      ? 'CRITICAL ALERT: Direct APK download detected. Untrusted side-loading poses high malware risk.'
-      : 'CAUTION: Unregistered domain shortener detected. Proceed with extreme caution.',
-    signals: isApk
-      ? [{ code: 'DIRECT_APK_DOWNLOAD', severity: 'high', message: 'Link points directly to executable Android package.' }]
-      : [{ code: 'URL_SHORTENER_DETECTED', severity: 'caution', message: 'Target URL hides true destination.' }],
-    recommended_actions: isApk
-      ? ['Do NOT download or install this APK file.', 'Block sender immediately.']
-      : ['Verify destination before submitting sensitive data.'],
-    provider_status: { llm: 'success', threat_lookup: 'success' },
-    can_report: true,
-  };
-};
-
-const analyzeTextMock = (text: string): ScanResponseEnvelope => {
-  const isScam = text.toLowerCase().includes('kyc') || text.toLowerCase().includes('suspend') || text.toLowerCase().includes('lottery');
-  return {
-    request_id: `text-scan-${Date.now()}`,
-    scanner: 'text',
-    verdict: isScam ? 'red' : 'green',
-    safety_score: isScam ? 25 : 88,
-    explanation: isScam
-      ? 'HIGH RISK: Message relies on artificial urgency and threat of account deactivation.'
-      : 'LOW RISK: Text contains no known scam patterns or coercive language.',
-    signals: isScam
-      ? [{ code: 'URGENCY_COERCION', severity: 'high', message: 'Text uses threat of deactivation to induce fast action.' }]
-      : [{ code: 'CLEAN_TAXONOMY', severity: 'info', message: 'No high-impact keyword triggers found.' }],
-    recommended_actions: isScam
-      ? ['Do NOT click links in this message.', 'Contact official bank customer support directly.']
-      : ['No high-risk actions detected.'],
-    provider_status: { llm: 'success', threat_lookup: 'success' },
-    can_report: true,
-  };
-};
-
 // --- HOME SCREEN ---
 function HomeScreen({ navigation }: NativeStackScreenProps<RootStackParamList, 'Home'>) {
+  const handleScreenshotScan = async (asset: any) => {
+    try {
+      const response = await FileSystem.uploadAsync(
+        `${API_BASE_URL}/api/v1/scan/screenshot`, 
+        asset.uri, 
+        {
+          fieldName: 'file', // Must match FastAPI parameter: file: UploadFile
+          httpMethod: 'POST',
+          uploadType: 'MULTIPART',
+          headers: {
+            Accept: 'application/json',
+          },
+        }
+      );
+
+      if (response.status !== 200) {
+        throw new Error(`Server error (${response.status}): ${response.body}`);
+      }
+
+      const result = JSON.parse(response.body);
+      return result;
+    } catch (error) {
+      console.error('Multipart upload failed:', error);
+      throw error;
+    }
+  };
+
   const handlePickImage = async () => {
-    let result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 1,
-    });
-    if (!result.canceled) {
-      navigation.navigate('Verdict', { result: analyzeScreenshotMock() });
+    try {
+      const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permissionResult.granted) {
+        Alert.alert('Permission Denied', 'Permission to access camera roll is required!');
+        return;
+      }
+
+      const pickerResult = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: false,
+        quality: 1,
+      });
+
+      if (!pickerResult.canceled && pickerResult.assets && pickerResult.assets.length > 0) {
+        const asset = pickerResult.assets[0];
+        const result = await handleScreenshotScan(asset);
+        navigation.navigate('Verdict', { result });
+      }
+    } catch (error: any) {
+      console.error('Image pick or upload error:', error);
+      Alert.alert('Error', `Failed to process screenshot: ${error.message}`);
     }
   };
 
@@ -173,14 +164,13 @@ function QRScannerScreen({ navigation }: NativeStackScreenProps<RootStackParamLi
     setScanned(true);
     
     try {
-      const response = await fetch('http://172.31.98.4:8000/api/v1/scan/qr', {
+      const response = await fetch(`${API_BASE_URL}/api/v1/scan/qr`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ payload: data, action: expectedAction })
       });
       
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      
       const result = await response.json();
       navigation.navigate('Verdict', { result });
     } catch (error: any) {
@@ -194,14 +184,13 @@ function QRScannerScreen({ navigation }: NativeStackScreenProps<RootStackParamLi
     if (!manualVpa.trim()) return;
     
     try {
-      const response = await fetch('http://172.31.98.4:8000/api/v1/scan/vpa', {
+      const response = await fetch(`${API_BASE_URL}/api/v1/scan/vpa`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ vpa: manualVpa, action: expectedAction })
       });
 
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-
       const result = await response.json();
       navigation.navigate('Verdict', { result });
     } catch (error: any) {
@@ -246,9 +235,21 @@ function QRScannerScreen({ navigation }: NativeStackScreenProps<RootStackParamLi
 function LinkScannerScreen({ navigation }: NativeStackScreenProps<RootStackParamList, 'LinkScanner'>) {
   const [url, setUrl] = useState('');
 
-  const handleAnalyze = () => {
+  const handleAnalyze = async () => {
     if (!url.trim()) return;
-    navigation.navigate('Verdict', { result: analyzeUrlMock(url) });
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/scan/url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const result = await response.json();
+      navigation.navigate('Verdict', { result });
+    } catch (error: any) {
+      console.error('Network Error:', error);
+      Alert.alert('Connection Error', `Could not reach backend for URL scan: ${error.message}`);
+    }
   };
 
   return (
@@ -275,9 +276,21 @@ function LinkScannerScreen({ navigation }: NativeStackScreenProps<RootStackParam
 function MessageScannerScreen({ navigation }: NativeStackScreenProps<RootStackParamList, 'MessageScanner'>) {
   const [text, setText] = useState('');
 
-  const handleAnalyze = () => {
+  const handleAnalyze = async () => {
     if (!text.trim()) return;
-    navigation.navigate('Verdict', { result: analyzeTextMock(text) });
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/scan/text`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const result = await response.json();
+      navigation.navigate('Verdict', { result });
+    } catch (error: any) {
+      console.error('Network Error:', error);
+      Alert.alert('Connection Error', `Could not reach backend for text scan: ${error.message}`);
+    }
   };
 
   return (
@@ -305,20 +318,38 @@ function VerdictScreen({ route, navigation }: NativeStackScreenProps<RootStackPa
   const { result } = route.params;
   const [reportVisible, setReportVisible] = useState(false);
 
-  const submitReport = (reason: string) => {
+const submitReport = async (reason: string) => {
+  try {
+    // Notice the exact trailing slash on /reports/ to prevent the 307 Redirect
+    const response = await fetch(`${API_BASE_URL}/api/v1/reports/`, { 
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        request_id: result?.request_id || 'unknown',
+        reason: reason,
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
     setReportVisible(false);
-    Alert.alert('Report Submitted', `Controlled demo report logged under category: ${reason}. DB aggregate updated.`);
-  };
+    Alert.alert('Report Submitted', `Successfully logged under category: ${reason}`);
+  } catch (error: any) {
+    console.error('Network Error:', error);
+    Alert.alert('Connection Error', `Could not submit report: ${error.message}`);
+  }
+};
 
-  const safeVerdict = result.verdict || 'unable_to_verify';
+  const safeVerdict = result?.verdict || 'unable_to_verify';
 
-  // Helper to assign correct colors/icons based on verdict
   const getTheme = (verdict: string) => {
     switch (verdict) {
       case 'red': return { bg: '#FEE2E2', icon: '🔴', text: '#EF4444' };
       case 'yellow': return { bg: '#FEF3C7', icon: '🟡', text: '#D97706' };
       case 'green': return { bg: '#D1FAE5', icon: '🟢', text: '#10B981' };
-      default: return { bg: '#F3F4F6', icon: '⚪', text: '#6B7280' }; // Neutral gray for unable_to_verify
+      default: return { bg: '#F3F4F6', icon: '⚪', text: '#6B7280' };
     }
   };
 
@@ -332,17 +363,17 @@ function VerdictScreen({ route, navigation }: NativeStackScreenProps<RootStackPa
           <Text style={[styles.title, { color: theme.text }]}>
             {safeVerdict.toUpperCase().replaceAll('_', ' ')}
           </Text>
-          <Text style={styles.scoreValue}>Safety Score: {result.safety_score ?? 0}/100</Text>
+          <Text style={styles.scoreValue}>Safety Score: {result?.safety_score ?? 0}/100</Text>
         </View>
 
         <View style={styles.section}>
           <Text style={styles.sectionHeader}>Analysis Guidance</Text>
-          <Text style={styles.explanationText}>{result.explanation || 'No explanation provided.'}</Text>
+          <Text style={styles.explanationText}>{result?.explanation || 'No explanation provided.'}</Text>
         </View>
 
         <View style={styles.section}>
           <Text style={styles.sectionHeader}>Detected Signals</Text>
-          {(result.signals || []).map((sig, idx) => (
+          {(result?.signals || []).map((sig, idx) => (
             <View key={idx} style={styles.signalCard}>
               <Text style={styles.signalCode}>[{sig.severity?.toUpperCase() || 'INFO'}] {sig.code || 'UNKNOWN'}</Text>
               <Text style={styles.signalMsg}>{sig.message || ''}</Text>
@@ -350,7 +381,7 @@ function VerdictScreen({ route, navigation }: NativeStackScreenProps<RootStackPa
           ))}
         </View>
 
-        {result.can_report && (
+        {result?.can_report && (
           <TouchableOpacity style={styles.reportBtn} onPress={() => setReportVisible(true)}>
             <Text style={styles.reportBtnText}>🚨 Report as Fraudulent / Scam</Text>
           </TouchableOpacity>
@@ -361,7 +392,6 @@ function VerdictScreen({ route, navigation }: NativeStackScreenProps<RootStackPa
         </TouchableOpacity>
       </ScrollView>
 
-      {/* REPORT MODAL */}
       <Modal visible={reportVisible} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
